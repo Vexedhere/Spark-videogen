@@ -1,0 +1,15 @@
+create extension if not exists pgcrypto;
+create table if not exists public.profiles(id uuid primary key references auth.users(id) on delete cascade,display_name text,avatar_url text,plan text not null default 'free' check(plan in('free','creator','studio')),created_at timestamptz not null default now());
+create table if not exists public.generations(id uuid primary key default gen_random_uuid(),user_id uuid not null references auth.users(id) on delete cascade,prompt text not null,status text not null default 'processing' check(status in('processing','completed','failed')),video_url text,error_message text,created_at timestamptz not null default now());
+create index if not exists generations_user_created_idx on public.generations(user_id,created_at desc);
+alter table public.profiles enable row level security;alter table public.generations enable row level security;
+drop policy if exists "profiles own read" on public.profiles;create policy "profiles own read" on public.profiles for select using(auth.uid()=id);
+drop policy if exists "generations own read" on public.generations;create policy "generations own read" on public.generations for select using(auth.uid()=user_id);
+drop policy if exists "generations own insert" on public.generations;create policy "generations own insert" on public.generations for insert with check(auth.uid()=user_id);
+drop policy if exists "generations own update" on public.generations;create policy "generations own update" on public.generations for update using(auth.uid()=user_id);
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path=public as $$ begin insert into public.profiles(id,display_name,avatar_url) values(new.id,coalesce(new.raw_user_meta_data->>'full_name',new.email),new.raw_user_meta_data->>'avatar_url') on conflict(id) do nothing;return new;end;$$;
+drop trigger if exists on_auth_user_created on auth.users;create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
+insert into storage.buckets(id,name,public) values('videos','videos',true) on conflict(id) do update set public=true;
+drop policy if exists "public video read" on storage.objects;create policy "public video read" on storage.objects for select using(bucket_id='videos');
+drop policy if exists "users upload own videos" on storage.objects;create policy "users upload own videos" on storage.objects for insert with check(bucket_id='videos' and auth.uid()::text=(storage.foldername(name))[1]);
+drop policy if exists "users update own videos" on storage.objects;create policy "users update own videos" on storage.objects for update using(bucket_id='videos' and auth.uid()::text=(storage.foldername(name))[1]);
